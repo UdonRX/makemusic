@@ -2,13 +2,13 @@
 
 iPhone Safari向けの、参考曲解析 → 曲設計 → 編集・再生までをつなぐ作曲プロトタイプです。
 
-## v0.3 — 3-layer reference pipeline
+## v0.3.1 — browser-only audio analysis
 
 ### 1. アーティスト情報を探す層
 
 - MusicBrainz: アーティスト候補、国、種別、タグ
 - Songle: Beat、コード、メロディ、サビ・繰り返し構造
-- ユーザー所有音源: 12MB・10分以内のMP3 / M4A / WAV等から中央30秒だけを端末内で整形
+- ユーザー所有音源: 中央30秒をEssentia.js、中央12秒をDemucs + Basic Pitchで端末内解析
 - Spotify / YouTube等から音源を抽出する処理はありません
 
 ### 2. 曲の設計図を作る層
@@ -33,14 +33,13 @@ iPhone Safari向けの、参考曲解析 → 曲設計 → 編集・再生まで
 iPhone Safari
   ├─ Vercel static: React / Tone.js / Tonal.js
   ├─ browser WASM: Essentia.js（解析操作時だけlazy load）
+  ├─ browser WebGPU: Demucs Web（drums / bass / other / vocals）
+  ├─ browser TensorFlow.js: Spotify Basic Pitch
   ├─ Songle: browser direct
-  ├─ Vercel Function 1本: MusicBrainz proxy + Gemini planner
-  └─ Hugging Face public ZeroGPU Space
-       ├─ Demucs htdemucs
-       └─ Spotify Basic Pitch
+  └─ Vercel Function 1本: MusicBrainz proxy + Gemini planner
 ```
 
-Vercelへ音源をアップロードしません。音源はブラウザからHugging Face Spaceへ直接送られ、Space内の一時ディレクトリで処理後に削除されます。Make Musicへ戻るのは集約済みMusic DNA JSONだけです。
+音源はiPhoneの外へアップロードしません。初回解析時だけ公開配信元からDemucs ONNXモデル、ONNX Runtime、Basic Pitchモデル（合計最大約200MB）を取得し、ブラウザのHTTPキャッシュを利用します。Hugging Faceアカウント、Space、APIトークン、GPU日次枠は不要です。
 
 ## Vercel Hobby protection
 
@@ -50,7 +49,8 @@ Vercelへ音源をアップロードしません。音源はブラウザからHu
 - MusicBrainz結果: CDN 1日キャッシュ + Safari 7日キャッシュ
 - Gemini: ユーザー操作時のみ、端末ごとに1日8回まで
 - Geminiへ音源・stem・大量note eventは送らず、圧縮したMusic DNAだけを送信
-- ZeroGPU失敗はVercelへ再試行せず、ブラウザ内解析へフォールバック
+- Demucs / Basic PitchのモデルファイルはVercelから配信しない
+- WebGPU非対応や端末メモリ不足時はEssentia.jsへ自動フォールバック
 
 Hobbyには静的転送量やFunction利用量の上限があるため、無制限の第三者アクセスまで含む「絶対に上限へ到達しない」保証はできません。ただし通常の個人試作で重い処理がVercel消費へ加算されない設計です。Hobbyではオンデマンド超過課金を使わず、上限時は機能制限になります。
 
@@ -63,24 +63,14 @@ GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
-公開ZeroGPU Space IDは秘密ではないため、Vercel build variableまたはアプリの接続欄へ設定できます。
+## Browser analysis requirements
 
-```bash
-VITE_HF_SPACE_ID=owner/makemusic-audio-dna
-```
-
-## Hugging Face Space
-
-`hf-space/`を新しいPublic Gradio Spaceへそのまま配置し、HardwareでZeroGPUを選択します。
-
-- Python 3.10
-- Demucs 4.1.0 / htdemucs
-- Basic Pitch 0.4.0
-- 30秒以下、6MB以下のmono WAVのみ
-- 同時実行1、GPU処理最大120秒
-- 一時ファイルは関数終了時に削除
-
-ZeroGPUは共有無料枠のため、account eligibility、日次GPU時間、混雑、cold startに左右されます。接続できない場合もSongle + Essentia.js + ローカル設計図で作曲を続けられます。
+- iOS 26以降のSafari（WebGPU有効）
+- 解析中はSafariを前面で維持
+- 初回AI実行環境の取得は最大約200MB。その後はブラウザキャッシュを優先
+- Essentia.jsは30秒、負荷の高いDemucs + Basic Pitchは代表12秒だけを解析
+- Web Worker内で処理し、完了後はWorkerを終了してモデル・stemメモリを解放
+- アプリ側の解析回数・日次GPU時間制限なし
 
 ## Development
 
@@ -93,8 +83,8 @@ npm run build
 ## Licensing notes
 
 - Essentia.js: AGPL-3.0
-- Demucs code: MIT（モデル・学習データの条件は用途ごとに要確認）
-- Basic Pitch: Apache-2.0
+- Demucs / demucs-web: MIT（モデル・学習データの条件は用途ごとに要確認）
+- Spotify Basic Pitch TypeScript: Apache-2.0
 - Songle: 研究実証サービス。営利利用へ進む前に最新規約を確認し、必要に応じて運営元へ相談
 
 このリポジトリは公開プロトタイプを前提にしています。ユーザーは権利を持つ音源、または解析許可を得た音源だけをアップロードしてください。

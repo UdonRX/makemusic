@@ -17,10 +17,14 @@ const localAudio = {
     dynamicComplexity: 3.2,
     danceability: 1.14,
   },
+  channels: {
+    left: new Float32Array([0.1, -0.1]),
+    right: new Float32Array([0.1, -0.1]),
+  },
 }
 
-const zeroGpu = {
-  provider: 'huggingface-zerogpu',
+const browserStemAnalysis = {
+  provider: 'browser-webgpu',
   stems: {
     drums: { relativeLevel: 0.32, onsetsPerSecond: 3.8 },
     bass: { relativeLevel: 0.23, noteDensity: 1.4, pitchLow: 36, pitchHigh: 48 },
@@ -30,23 +34,24 @@ const zeroGpu = {
 }
 
 test('uploaded audio becomes compact Music DNA v2 without raw audio', () => {
-  const analysis = analysisFromUploadedAudio(localAudio, zeroGpu)
+  const analysis = analysisFromUploadedAudio(localAudio, browserStemAnalysis)
   assert.equal(analysis.schemaVersion, 2)
   assert.equal(analysis.harmony.key.tonic, 'Gb')
   assert.equal(analysis.harmony.key.mode, 'minor')
   assert.equal(analysis.instrumentation.status, 'analyzed')
   assert.equal(analysis.stems.melody.noteDensity, 1.1)
   assert.equal('wavBlob' in analysis, false)
+  assert.equal('channels' in analysis, false)
 
   const dna = aggregateMusicDna([analysis], 120, { id: 'artist-1', name: 'Reference Artist', tags: ['electronic'] })
   assert.equal(dna.schemaVersion, 2)
   assert.equal(dna.artist.name, 'Reference Artist')
-  assert.equal(dna.stems.provider, 'demucs + basic-pitch')
+  assert.equal(dna.stems.provider, 'browser demucs + basic-pitch')
   assert.equal(dna.pipeline.essentia.status, 'active')
 })
 
 test('local blueprint and AI normalization always produce editable track presets', () => {
-  const analysis = analysisFromUploadedAudio(localAudio, zeroGpu)
+  const analysis = analysisFromUploadedAudio(localAudio, browserStemAnalysis)
   const dna = aggregateMusicDna([analysis], 120)
   const fallback = createLocalBlueprint(dna, '夜に踊れる曲')
   assert.ok(DRUM_PRESETS[fallback.tracks.drums.preset])

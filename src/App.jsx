@@ -4,7 +4,7 @@ import { Chord, Scale } from 'tonal'
 import { aggregateMusicDna, analysisFromUploadedAudio, analyzeSongleReference, searchSongleSongs } from './music/referenceAnalysis'
 import { searchMusicBrainzArtists } from './music/artistSearch'
 import { analyzeAudioFileLocally } from './music/audioAnalysis'
-import { analyzeWithZeroGpu, getZeroGpuSpaceId, saveZeroGpuSpaceId } from './music/zeroGpuClient'
+import { analyzeStemsInBrowser, getBrowserStemCapabilities, STEM_ANALYSIS_SECONDS } from './music/browserStemAnalysis'
 import { BASS_PRESETS, createLocalBlueprint, DRUM_PRESETS, requestSongBlueprint } from './music/songBlueprint'
 
 const KEYS = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
@@ -210,7 +210,6 @@ function App() {
   const [selectedArtist, setSelectedArtist] = useState(null)
   const [selectedReferences, setSelectedReferences] = useState([])
   const [audioFiles, setAudioFiles] = useState([])
-  const [zeroGpuSpaceId, setZeroGpuSpaceId] = useState(() => getZeroGpuSpaceId())
   const [referenceLoading, setReferenceLoading] = useState(false)
   const [referenceStatus, setReferenceStatus] = useState('')
   const [referenceError, setReferenceError] = useState('')
@@ -228,6 +227,7 @@ function App() {
   const playbackWatchdogRef = useRef(null)
 
   const diatonicChords = useMemo(() => getDiatonicChords(keyName, mode), [keyName, mode])
+  const browserStemCapabilities = useMemo(() => getBrowserStemCapabilities(), [])
 
   const candidates = useMemo(() => {
     if (progression.length >= MAX_CHORDS) return []
@@ -568,7 +568,7 @@ function App() {
 
   const copyAudioDiagnostics = async () => {
     const payload = {
-      app: 'makemusic v0.3.0',
+      app: 'makemusic v0.3.1',
       page: window.location.href,
       userAgent: navigator.userAgent,
       visibility: document.visibilityState,
@@ -656,25 +656,25 @@ function App() {
         setReferenceStatus(`Songle ${index + 1} / ${selectedReferences.length} 曲を解析中…`)
         analyses.push(await analyzeSongleReference(selectedReferences[index]))
       }
-      let zeroGpuUsed = false
-      let zeroGpuWarning = ''
+      let browserAnalysisWarning = ''
       for (let index = 0; index < audioFiles.length; index += 1) {
         const file = audioFiles[index]
         const local = await analyzeAudioFileLocally(file, setReferenceStatus)
-        let remote = null
-        if (!zeroGpuUsed && zeroGpuSpaceId) {
+        let stemAnalysis = null
+        if (browserStemCapabilities.supported) {
           try {
-            remote = await analyzeWithZeroGpu(local.wavBlob, file.name, setReferenceStatus, zeroGpuSpaceId)
-            zeroGpuUsed = true
+            stemAnalysis = await analyzeStemsInBrowser(local.channels, file.name, setReferenceStatus)
           } catch (error) {
-            zeroGpuWarning = `ZeroGPUは利用できませんでした（${error.message}）。Essentia.jsの結果だけで続行しました。`
+            browserAnalysisWarning = `端末内Demucsは完了できませんでした（${error.message}）。Essentia.jsの結果だけで続行しました。`
           }
+        } else {
+          browserAnalysisWarning = 'WebGPU非対応のため、Essentia.jsとBasic PitchなしのMusic DNAで続行しました。'
         }
-        analyses.push(analysisFromUploadedAudio(local, remote))
+        analyses.push(analysisFromUploadedAudio(local, stemAnalysis))
       }
       const dna = aggregateMusicDna(analyses, targetDurationSec, selectedArtist || artistResults[0] || null)
       setMusicDna(dna)
-      setReferenceStatus(zeroGpuWarning || 'Music DNA解析完了')
+      setReferenceStatus(browserAnalysisWarning || 'Music DNA解析完了 · すべて端末内で処理しました')
     } catch (error) {
       setReferenceError(`${error.message}。別の参考曲か、30秒解析できる音源を試してください。`)
       setReferenceStatus('')
@@ -796,27 +796,18 @@ function App() {
           )}
 
           <section className="panel upload-panel">
-            <div className="section-head"><span>OWNED AUDIO · OPTIONAL</span><span>Essentia.js + ZeroGPU</span></div>
+            <div className="section-head"><span>OWNED AUDIO · OPTIONAL</span><span>100% ON DEVICE</span></div>
             <label className="file-picker">
               <input type="file" accept="audio/*,.mp3,.m4a,.wav,.flac,.ogg" multiple onChange={selectAudioFiles} disabled={selectedReferences.length >= 3} />
               <b>＋ 音源を選ぶ</b>
-              <small>MP3 / M4A / WAV · 各12MB・10分以内 · 中央30秒だけ解析</small>
+              <small>MP3 / M4A / WAV · 各12MB・10分以内 · Essentia 30秒 / Stem {STEM_ANALYSIS_SECONDS}秒</small>
             </label>
-            <details className="worker-settings">
-              <summary>Hugging Face ZeroGPU接続</summary>
-              <label>
-                <span>公開Space ID</span>
-                <input value={zeroGpuSpaceId} placeholder="owner/makemusic-audio-dna" onChange={(event) => setZeroGpuSpaceId(event.target.value)} onBlur={() => {
-                  try {
-                    setZeroGpuSpaceId(saveZeroGpuSpaceId(zeroGpuSpaceId))
-                    setReferenceError('')
-                  } catch (error) {
-                    setReferenceError(error.message)
-                  }
-                }} />
-              </label>
-              <p>トークンは保存しません。未接続・混雑・無料枠終了時はEssentia.jsだけで続行します。</p>
-            </details>
+            <div className={`browser-analysis-card ${browserStemCapabilities.supported ? 'ready' : ''}`}>
+              <b>{browserStemCapabilities.label}</b>
+              <span>{browserStemCapabilities.message}</span>
+              <small>初回のみAI実行環境を最大約200MB取得。Wi-Fi推奨・解析中はSafariを閉じないでください。</small>
+              <small>ログイン・音源送信・アプリ側の解析回数制限はありません。</small>
+            </div>
           </section>
 
           <section className="panel">
@@ -880,8 +871,8 @@ function App() {
                   <span className={musicDna.artist ? 'ready' : ''}>MusicBrainz</span>
                   <span className={selectedReferences.length ? 'ready' : ''}>Songle</span>
                   <span className={musicDna.audioFeatures ? 'ready' : ''}>Essentia.js</span>
-                  <span className={musicDna.stems ? 'ready' : ''}>Demucs</span>
-                  <span className={musicDna.stems ? 'ready' : ''}>Basic Pitch</span>
+                  <span className={musicDna.stems ? 'ready' : ''}>Demucs WebGPU</span>
+                  <span className={musicDna.stems ? 'ready' : ''}>Basic Pitch TS</span>
                 </div>
                 <div className="degree-row">
                   <small>特徴的なコード度数</small>
@@ -926,7 +917,7 @@ function App() {
                   <i>→</i>
                   <div><b>3</b><span><strong>編集可能トラック</strong><small>Chord · Drum · Bass · Melody</small></span></div>
                 </div>
-                <p className="microcopy">Vercelは静的UIと小さなPlanner API 1本だけ。Demucs / Basic PitchはZeroGPU、Essentia.jsは端末内で動作。</p>
+                <p className="microcopy">Demucs / Basic Pitch / Essentia.jsはiPhone内で実行。Vercelへ音源を送らず、GPUの日次枠も使いません。</p>
               </section>
             </>
           )}
@@ -1094,7 +1085,7 @@ function App() {
         </>
       )}
 
-      <footer>v0.3.0 · Vercel Function 1 · Essentia.js + ZeroGPU + Gemini fallback</footer>
+      <footer>v0.3.1 · Browser WebGPU · Demucs + Basic Pitch + Essentia.js</footer>
     </main>
   )
 }

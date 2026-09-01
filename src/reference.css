@@ -422,38 +422,25 @@
 .file-picker small { margin-top: 5px; color: #85848f; font-size: 8px; }
 .selected-reference.uploaded { background: rgba(60,52,91,0.5); }
 
-.worker-settings {
+.browser-analysis-card {
+  display: grid;
+  gap: 3px;
   margin-top: 8px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255,255,255,0.06);
   border-radius: 13px;
   background: #111118;
 }
 
-.worker-settings summary {
-  padding: 11px 12px;
-  color: #9998a4;
-  font-size: 9px;
-  font-weight: 800;
-  cursor: pointer;
+.browser-analysis-card.ready {
+  border-color: rgba(75,227,160,0.28);
+  background: rgba(30,66,49,0.3);
 }
 
-.worker-settings label {
-  display: grid;
-  gap: 6px;
-  padding: 0 10px 9px;
-}
-
-.worker-settings label span { color: #83828d; font-size: 8px; }
-.worker-settings input {
-  min-height: 40px;
-  padding: 0 10px;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 10px;
-  outline: none;
-  color: #fff;
-  background: #22222b;
-  font-size: 12px;
-}
-.worker-settings p { margin: 0; padding: 0 10px 10px; color: #666570; font-size: 8px; line-height: 1.5; }
+.browser-analysis-card b { color: #aaa9b4; font-size: 9px; }
+.browser-analysis-card.ready b { color: #79dfad; }
+.browser-analysis-card span { color: #d1d0d9; font-size: 9px; }
+.browser-analysis-card small { color: #6f6e79; font-size: 8px; line-height: 1.45; }
 
 .provider-badges {
   display: flex;

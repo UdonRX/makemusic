@@ -13,61 +13,33 @@ function assertAudioFile(file) {
   }
 }
 
-function mixToMono(audioBuffer) {
-  const mono = new Float32Array(audioBuffer.length)
-  for (let channel = 0; channel < audioBuffer.numberOfChannels; channel += 1) {
-    const input = audioBuffer.getChannelData(channel)
-    for (let index = 0; index < input.length; index += 1) mono[index] += input[index] / audioBuffer.numberOfChannels
-  }
-  return mono
-}
-
 async function cropAndResample(audioBuffer) {
   const clipDuration = Math.min(ANALYSIS_SECONDS, audioBuffer.duration)
   const clipStart = Math.max(0, (audioBuffer.duration - clipDuration) * 0.5)
   const sourceStart = Math.floor(clipStart * audioBuffer.sampleRate)
   const sourceLength = Math.max(1, Math.floor(clipDuration * audioBuffer.sampleRate))
-  const mono = mixToMono(audioBuffer).slice(sourceStart, sourceStart + sourceLength)
-  const offline = new OfflineAudioContext(1, Math.ceil(clipDuration * TARGET_SAMPLE_RATE), TARGET_SAMPLE_RATE)
-  const sourceBuffer = offline.createBuffer(1, mono.length, audioBuffer.sampleRate)
-  sourceBuffer.copyToChannel(mono, 0)
+  const offline = new OfflineAudioContext(2, Math.ceil(clipDuration * TARGET_SAMPLE_RATE), TARGET_SAMPLE_RATE)
+  const sourceBuffer = offline.createBuffer(2, sourceLength, audioBuffer.sampleRate)
+  const left = audioBuffer.getChannelData(0).slice(sourceStart, sourceStart + sourceLength)
+  const rightSource = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : audioBuffer.getChannelData(0)
+  const right = rightSource.slice(sourceStart, sourceStart + sourceLength)
+  sourceBuffer.copyToChannel(left, 0)
+  sourceBuffer.copyToChannel(right, 1)
   const source = offline.createBufferSource()
   source.buffer = sourceBuffer
   source.connect(offline.destination)
   source.start()
   const rendered = await offline.startRendering()
+  const renderedLeft = new Float32Array(rendered.getChannelData(0))
+  const renderedRight = new Float32Array(rendered.getChannelData(1))
+  const mono = new Float32Array(renderedLeft.length)
+  for (let index = 0; index < mono.length; index += 1) mono[index] = (renderedLeft[index] + renderedRight[index]) * 0.5
   return {
-    samples: new Float32Array(rendered.getChannelData(0)),
+    samples: mono,
+    channels: { left: renderedLeft, right: renderedRight },
     clipStart,
     clipDuration: rendered.duration,
   }
-}
-
-function writeText(view, offset, value) {
-  for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index))
-}
-
-function samplesToWav(samples, sampleRate = TARGET_SAMPLE_RATE) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2)
-  const view = new DataView(buffer)
-  writeText(view, 0, 'RIFF')
-  view.setUint32(4, 36 + samples.length * 2, true)
-  writeText(view, 8, 'WAVE')
-  writeText(view, 12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  writeText(view, 36, 'data')
-  view.setUint32(40, samples.length * 2, true)
-  samples.forEach((sample, index) => {
-    const value = Math.max(-1, Math.min(1, sample))
-    view.setInt16(44 + index * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true)
-  })
-  return new Blob([buffer], { type: 'audio/wav' })
 }
 
 function simpleFeatures(samples) {
@@ -147,7 +119,7 @@ export async function analyzeAudioFileLocally(file, onStatus = () => {}) {
       clipDurationSec: round(clip.clipDuration, 1),
       sampleRate: TARGET_SAMPLE_RATE,
       features: { ...base, ...essentiaFeatures },
-      wavBlob: samplesToWav(clip.samples),
+      channels: clip.channels,
     }
   } finally {
     await context.close().catch(() => {})

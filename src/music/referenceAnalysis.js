@@ -327,9 +327,9 @@ export async function analyzeSongleReference(reference) {
   return result
 }
 
-export function analysisFromUploadedAudio(localAnalysis, zeroGpuAnalysis = null) {
+export function analysisFromUploadedAudio(localAnalysis, stemAnalysis = null) {
   const features = localAnalysis?.features || {}
-  const stems = zeroGpuAnalysis?.stems || {}
+  const stems = stemAnalysis?.stems || {}
   const melodicStem = stems.vocals?.noteCount ? stems.vocals : stems.other?.noteCount ? stems.other : null
   const bassStem = stems.bass || null
   const bpm = Math.round(clamp(Number(features.bpm) || 120, 70, 190))
@@ -345,7 +345,7 @@ export function analysisFromUploadedAudio(localAnalysis, zeroGpuAnalysis = null)
 
   return {
     schemaVersion: 2,
-    provider: zeroGpuAnalysis ? 'uploaded-audio-full' : 'uploaded-audio-local',
+    provider: stemAnalysis ? 'uploaded-audio-full' : 'uploaded-audio-local',
     reference: {
       title: localAnalysis?.fileName || 'アップロード音源',
       artist: 'ユーザー所有音源',
@@ -367,7 +367,7 @@ export function analysisFromUploadedAudio(localAnalysis, zeroGpuAnalysis = null)
     melody: {
       rangeSemitones: Math.round(range),
       stepwiseRatio: round(melodicStem?.stepwiseRatio || 0.7, 2),
-      repetitionRatio: round(clamp(0.72 - (melodicStem?.meanDuration || 0.3) * 0.35, 0.2, 0.8), 2),
+      repetitionRatio: round(melodicStem?.repetitionRatio || clamp(0.72 - (melodicStem?.meanDuration || 0.3) * 0.35, 0.2, 0.8), 2),
       notesPerBeat: round(notesPerBeat, 2),
     },
     structure: { chorusCount: 0, firstChorusRatio: 0.52, chorusShare: 0.28 },
@@ -379,8 +379,8 @@ export function analysisFromUploadedAudio(localAnalysis, zeroGpuAnalysis = null)
       dynamicComplexity: Number(features.dynamicComplexity) || 0,
       danceability: Number(features.danceability) || 0,
     },
-    stems: zeroGpuAnalysis ? {
-      provider: zeroGpuAnalysis.provider,
+    stems: stemAnalysis ? {
+      provider: stemAnalysis.provider,
       drums: stems.drums ? { relativeLevel: stems.drums.relativeLevel, onsetsPerSecond: stems.drums.onsetsPerSecond } : null,
       bass: bassStem ? { relativeLevel: bassStem.relativeLevel, noteDensity: bassStem.noteDensity, pitchLow: bassStem.pitchLow, pitchHigh: bassStem.pitchHigh } : null,
       harmony: stems.other ? { relativeLevel: stems.other.relativeLevel, noteDensity: stems.other.noteDensity } : null,
@@ -388,14 +388,14 @@ export function analysisFromUploadedAudio(localAnalysis, zeroGpuAnalysis = null)
       vocals: stems.vocals ? { relativeLevel: stems.vocals.relativeLevel } : null,
     } : null,
     instrumentation: {
-      status: zeroGpuAnalysis ? 'analyzed' : 'essentia-only',
-      message: zeroGpuAnalysis ? 'Demucs + Basic Pitch解析済み' : 'ZeroGPU未接続のためEssentia.jsのみ',
+      status: stemAnalysis ? 'analyzed' : 'essentia-only',
+      message: stemAnalysis ? '端末内Demucs + Basic Pitch解析済み' : 'WebGPUを利用できないためEssentia.jsのみ',
     },
     providers: {
       artistInfo: null,
       musicalMap: null,
-      stems: zeroGpuAnalysis ? 'demucs/htdemucs' : null,
-      transcription: zeroGpuAnalysis ? 'spotify/basic-pitch' : null,
+      stems: stemAnalysis ? 'demucs-web/htdemucs' : null,
+      transcription: stemAnalysis ? 'spotify/basic-pitch-ts' : null,
       audioFeatures: features.provider || 'browser-fallback',
     },
   }
@@ -493,7 +493,7 @@ export function aggregateMusicDna(analyses, targetDurationSec = 120, artist = nu
       danceability: round(average(analyses.map((item) => item.audioFeatures?.danceability)), 2),
     } : null,
     stems: analyses.some((item) => item.stems) ? {
-      provider: 'demucs + basic-pitch',
+      provider: 'browser demucs + basic-pitch',
       drums: {
         relativeLevel: round(average(analyses.map((item) => item.stems?.drums?.relativeLevel)), 3),
         onsetsPerSecond: round(average(analyses.map((item) => item.stems?.drums?.onsetsPerSecond)), 2),
@@ -516,8 +516,8 @@ export function aggregateMusicDna(analyses, targetDurationSec = 120, artist = nu
       artistInfo: { provider: artist ? 'MusicBrainz + Songle' : 'Songle', status: 'active', cost: 0 },
       blueprint: { provider: 'Gemini free tier + local fallback', status: 'ready', cost: 0 },
       editableTracks: { provider: 'Tone.js + Tonal.js', status: 'active', cost: 0 },
-      demucs: { provider: 'Hugging Face ZeroGPU', status: analyses.some((item) => item.stems) ? 'active' : 'optional' },
-      basicPitch: { provider: 'Hugging Face ZeroGPU', status: analyses.some((item) => item.stems) ? 'active' : 'optional' },
+      demucs: { provider: 'iPhone WebGPU', status: analyses.some((item) => item.stems) ? 'active' : 'optional' },
+      basicPitch: { provider: 'browser TypeScript', status: analyses.some((item) => item.stems) ? 'active' : 'optional' },
       essentia: { provider: 'browser WASM', status: analyses.some((item) => item.audioFeatures) ? 'active' : 'optional' },
     },
   }
