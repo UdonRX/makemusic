@@ -1,4 +1,4 @@
-import { Chord, Scale } from 'tonal'
+import { Chord, Note, Scale } from 'tonal'
 
 const SONGLE_API = 'https://widget.songle.jp/api/v1'
 const CACHE_PREFIX = 'makemusic:reference:v1:'
@@ -30,7 +30,20 @@ function asArray(payload, keys) {
 }
 
 function normalizeSourceUrl(url = '') {
-  return String(url).trim().replace(/^https?:\/\//i, '')
+  let value = String(url).trim()
+  try {
+    const parsed = new URL(value)
+    if (parsed.hostname === 'youtu.be') {
+      const videoId = parsed.pathname.replace(/^\//, '')
+      if (videoId) value = `https://www.youtube.com/watch?v=${videoId}`
+    } else if (parsed.hostname === 'music.youtube.com') {
+      parsed.hostname = 'www.youtube.com'
+      value = parsed.toString()
+    }
+  } catch {
+    // Songle also accepts URLs without scheme.
+  }
+  return value.replace(/^https?:\/\//i, '')
 }
 
 function normalizeChordName(rawName = '') {
@@ -130,7 +143,7 @@ function inferKey(chords) {
   const candidates = []
   for (const tonic of CHROMATIC_TONICS) {
     for (const mode of ['major', 'minor']) {
-      const scaleNotes = new Set(Scale.get(`${tonic} ${mode}`).notes)
+      const scaleChromas = new Set(Scale.get(`${tonic} ${mode}`).notes.map((note) => Note.chroma(note)))
       let score = 0
       let total = 0
 
@@ -140,9 +153,9 @@ function inferKey(chords) {
         const weight = Math.max(120, item.duration)
         total += weight
         if (!notes.length) return
-        const fit = notes.filter((note) => scaleNotes.has(note)).length / notes.length
+        const fit = notes.filter((note) => scaleChromas.has(Note.chroma(note))).length / notes.length
         score += fit * weight
-        if (chord.tonic === tonic) {
+        if (Note.chroma(chord.tonic) === Note.chroma(tonic)) {
           const isMinor = /m(?!aj)/.test(item.name)
           if ((mode === 'minor' && isMinor) || (mode === 'major' && !isMinor)) score += weight * 0.14
         }
@@ -163,11 +176,12 @@ function inferKey(chords) {
 
 function chordDegreeSequence(chords, key) {
   const scale = Scale.get(`${key.tonic} ${key.mode}`).notes
+  const scaleChromas = scale.map((note) => Note.chroma(note))
   const compressed = []
   chords.forEach((item) => {
     const chord = Chord.get(item.name)
     if (!chord?.tonic) return
-    const degree = scale.indexOf(chord.tonic)
+    const degree = scaleChromas.indexOf(Note.chroma(chord.tonic))
     if (degree < 0) return
     if (compressed[compressed.length - 1] !== degree) compressed.push(degree)
   })
