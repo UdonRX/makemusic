@@ -68,13 +68,7 @@ function generateMelody(keyName, mode, progression) {
   const scaleMidi = midiPoolForPitchClasses(scalePcs)
   if (!scaleMidi.length || !progression.length) return []
 
-  const motif = [
-    0,
-    [-1, 1][Math.floor(Math.random() * 2)],
-    [-2, -1, 1, 2][Math.floor(Math.random() * 4)],
-    0,
-  ]
-
+  const motif = [0, [-1, 1][Math.floor(Math.random() * 2)], [-2, -1, 1, 2][Math.floor(Math.random() * 4)], 0]
   const notes = []
   let previous = scaleMidi[Math.floor(scaleMidi.length * 0.45)]
 
@@ -93,9 +87,7 @@ function generateMelody(keyName, mode, progression) {
         anchorIndex = clamp(scaleMidi.indexOf(nearestMidi(scaleMidi, nextMidi)), 0, scaleMidi.length - 1)
       } else {
         const motifStep = motif[step % 4]
-        const variation = barIndex % 2 === 1 && step === 7 && Math.random() < 0.7
-          ? (Math.random() < 0.5 ? -1 : 1)
-          : 0
+        const variation = barIndex % 2 === 1 && step === 7 && Math.random() < 0.7 ? (Math.random() < 0.5 ? -1 : 1) : 0
         const targetIndex = clamp(anchorIndex + motifStep + variation, 0, scaleMidi.length - 1)
         nextMidi = scaleMidi[targetIndex]
       }
@@ -115,8 +107,8 @@ function generateMelody(keyName, mode, progression) {
 function chordVoicing(chordName) {
   const pcs = Chord.get(chordName).notes
   let previousMidi = 47
-  return pcs.slice(0, 4).map((pc) => {
-    let midi = Tone.Frequency(`${pc}3`).toMidi()
+  return pcs.slice(0, 4).map((pc, index) => {
+    let midi = Tone.Frequency(`${pc}${index === 0 ? 3 : 3}`).toMidi()
     while (midi < 48) midi += 12
     while (midi <= previousMidi) midi += 12
     if (midi > 72) midi -= 12
@@ -225,29 +217,21 @@ function App() {
       })
 
       ;[0, 2].forEach((beat) => {
-        Tone.Transport.schedule((time) => {
-          instruments.kick.triggerAttackRelease('C1', '8n', time, 0.9)
-        }, `${bar}:${beat}:0`)
+        Tone.Transport.schedule((time) => instruments.kick.triggerAttackRelease('C1', '8n', time, 0.9), `${bar}:${beat}:0`)
       })
 
       ;[1, 3].forEach((beat) => {
-        Tone.Transport.schedule((time) => {
-          instruments.snare.triggerAttackRelease('16n', time, 0.5)
-        }, `${bar}:${beat}:0`)
+        Tone.Transport.schedule((time) => instruments.snare.triggerAttackRelease('16n', time, 0.5), `${bar}:${beat}:0`)
       })
 
       for (let eighth = 0; eighth < 8; eighth += 1) {
         const beat = Math.floor(eighth / 2)
         const sixteenth = eighth % 2 === 0 ? 0 : 2
-        Tone.Transport.schedule((time) => {
-          instruments.hat.triggerAttackRelease('32n', time, 0.24)
-        }, `${bar}:${beat}:${sixteenth}`)
+        Tone.Transport.schedule((time) => instruments.hat.triggerAttackRelease('32n', time, 0.24), `${bar}:${beat}:${sixteenth}`)
 
         const melodyNote = activeMelody[bar * 8 + eighth]
         if (melodyNote) {
-          Tone.Transport.schedule((time) => {
-            instruments.lead.triggerAttackRelease(melodyNote, '8n', time, 0.52)
-          }, `${bar}:${beat}:${sixteenth}`)
+          Tone.Transport.schedule((time) => instruments.lead.triggerAttackRelease(melodyNote, '8n', time, 0.52), `${bar}:${beat}:${sixteenth}`)
         }
       }
     })
@@ -272,6 +256,7 @@ function App() {
   }, [])
 
   const resetForHarmonyChange = (nextKey = keyName, nextMode = mode) => {
+    if (nextKey === keyName && nextMode === mode) return
     setKeyName(nextKey)
     setMode(nextMode)
     setProgression([])
@@ -353,11 +338,7 @@ function App() {
         </div>
         <div className="mode-switch" role="group" aria-label="major minor">
           {['major', 'minor'].map((item) => (
-            <button
-              key={item}
-              className={mode === item ? 'active' : ''}
-              onClick={() => resetForHarmonyChange(keyName, item)}
-            >
+            <button key={item} className={mode === item ? 'active' : ''} onClick={() => resetForHarmonyChange(keyName, item)}>
               {item}
             </button>
           ))}
