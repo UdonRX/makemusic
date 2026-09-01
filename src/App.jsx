@@ -159,7 +159,7 @@ function App() {
   const [melodies, setMelodies] = useState([[], [], []])
   const [selectedMelody, setSelectedMelody] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [audioReady, setAudioReady] = useState(false)
+  const [playbackError, setPlaybackError] = useState('')
   const [activeDna, setActiveDna] = useState(null)
 
   const [referenceQuery, setReferenceQuery] = useState('')
@@ -186,6 +186,9 @@ function App() {
 
   const initAudio = useCallback(async () => {
     await Tone.start()
+    const context = Tone.getContext()
+    if (context.state !== 'running') await context.resume()
+    if (context.state !== 'running') throw new Error('音声を開始できませんでした')
     if (instrumentsRef.current) return
 
     const piano = new Tone.PolySynth(Tone.Synth, {
@@ -228,7 +231,6 @@ function App() {
     lead.volume.value = -12
 
     instrumentsRef.current = { piano, bass, kick, snare, hat, lead }
-    setAudioReady(true)
   }, [])
 
   const configureTransport = useCallback(() => {
@@ -280,9 +282,13 @@ function App() {
     Tone.Transport.bpm.rampTo(bpm, 0.05)
   }, [bpm])
 
+  // 再生開始は必ずタップ処理内で行う。ここは再生中の編集反映だけを担当する。
   useEffect(() => {
-    if (isPlaying && audioReady && progression.length) configureTransport()
-  }, [audioReady, configureTransport, isPlaying, progression.length])
+    if (isPlaying && instrumentsRef.current && progression.length) configureTransport()
+    // isPlaying を依存配列へ加えると、iOSでユーザー操作後のEffectから
+    // Transportを開始する経路へ戻るため、編集値だけを監視する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bpm, melodies, progression, selectedMelody])
 
   useEffect(() => () => {
     Tone.Transport.stop()
@@ -294,6 +300,7 @@ function App() {
     Tone.Transport.stop()
     Tone.Transport.cancel(0)
     setIsPlaying(false)
+    setPlaybackError('')
   }
 
   const resetForHarmonyChange = (nextKey = keyName, nextMode = mode) => {
@@ -338,8 +345,19 @@ function App() {
       stopPlayback()
       return
     }
-    await initAudio()
-    setIsPlaying(true)
+    setPlaybackError('')
+    try {
+      // iPhone SafariではAudioContextの解除とTransport開始を、同じタップ処理の
+      // 中で完了させる必要がある。state/useEffectを経由させない。
+      await initAudio()
+      configureTransport()
+      setIsPlaying(true)
+    } catch (error) {
+      Tone.Transport.stop()
+      Tone.Transport.cancel(0)
+      setIsPlaying(false)
+      setPlaybackError(`${error?.message || '音声を開始できなかった'}。もう一度タップしてみて。`)
+    }
   }
 
   const addReference = (song) => {
@@ -614,6 +632,7 @@ function App() {
             <button className={`play-button ${isPlaying ? 'playing' : ''}`} onClick={togglePlayback} disabled={!progression.length}>
               <span className="play-icon">{isPlaying ? '■' : '▶'}</span>{isPlaying ? '停止' : '伴奏を再生'}
             </button>
+            {playbackError && <p className="error-text" role="alert">{playbackError}</p>}
             <p className="microcopy">Piano + Bass + Drum。コード追加やBPM変更も再生に反映。</p>
           </section>
 
