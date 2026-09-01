@@ -150,6 +150,33 @@ function progressionFromDna(dna, targetKey) {
   return expanded.slice(0, MAX_CHORDS).map((degree) => chords[degree]).filter(Boolean)
 }
 
+function createSilentWavUrl() {
+  const sampleRate = 8000
+  const sampleCount = sampleRate
+  const buffer = new ArrayBuffer(44 + sampleCount)
+  const view = new DataView(buffer)
+  const writeText = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index))
+  }
+
+  writeText(0, 'RIFF')
+  view.setUint32(4, 36 + sampleCount, true)
+  writeText(8, 'WAVE')
+  writeText(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate, true)
+  view.setUint16(32, 1, true)
+  view.setUint16(34, 8, true)
+  writeText(36, 'data')
+  view.setUint32(40, sampleCount, true)
+  for (let index = 44; index < buffer.byteLength; index += 1) view.setUint8(index, 128)
+
+  return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }))
+}
+
 function App() {
   const [workspace, setWorkspace] = useState('create')
   const [keyName, setKeyName] = useState('C')
@@ -160,6 +187,8 @@ function App() {
   const [selectedMelody, setSelectedMelody] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [playbackError, setPlaybackError] = useState('')
+  const [audioDiagnostics, setAudioDiagnostics] = useState([])
+  const [copyStatus, setCopyStatus] = useState('ログをコピー')
   const [activeDna, setActiveDna] = useState(null)
 
   const [referenceQuery, setReferenceQuery] = useState('')
@@ -172,6 +201,9 @@ function App() {
   const [musicDna, setMusicDna] = useState(null)
 
   const instrumentsRef = useRef(null)
+  const mediaUnlockRef = useRef(null)
+  const firstTransportEventRef = useRef(false)
+  const playbackWatchdogRef = useRef(null)
 
   const diatonicChords = useMemo(() => getDiatonicChords(keyName, mode), [keyName, mode])
 
@@ -184,11 +216,83 @@ function App() {
     return indexes.map((index) => diatonicChords[index]).filter(Boolean)
   }, [diatonicChords, mode, progression])
 
+  const recordAudioDiagnostic = useCallback((event, extra = {}) => {
+    let snapshot = {}
+    try {
+      const context = Tone.getContext()
+      const rawContext = context.rawContext || context._context
+      snapshot = {
+        toneContext: context.state,
+        rawContext: rawContext?.state || 'unknown',
+        currentTime: Number(rawContext?.currentTime || 0).toFixed(3),
+        sampleRate: rawContext?.sampleRate || 'unknown',
+        transport: Tone.Transport.state,
+        transportSeconds: Number(Tone.Transport.seconds || 0).toFixed(3),
+        destinationMuted: Boolean(Tone.Destination.mute),
+        destinationVolume: Tone.Destination.volume.value,
+      }
+    } catch (error) {
+      snapshot = { snapshotError: error?.message || String(error) }
+    }
+
+    const entry = {
+      at: new Date().toISOString().slice(11, 23),
+      event,
+      ...snapshot,
+      ...extra,
+    }
+    console.info('[MakeMusic audio]', entry)
+    setAudioDiagnostics((current) => [...current.slice(-19), entry])
+  }, [])
+
+  const openMediaAudioChannel = useCallback(() => {
+    if (!mediaUnlockRef.current) {
+      const audio = document.createElement('audio')
+      const url = createSilentWavUrl()
+      audio.src = url
+      audio.loop = true
+      audio.preload = 'auto'
+      audio.setAttribute('playsinline', '')
+      audio.setAttribute('aria-hidden', 'true')
+      audio.style.display = 'none'
+      document.body.appendChild(audio)
+      mediaUnlockRef.current = { audio, url }
+    }
+    return mediaUnlockRef.current.audio.play()
+  }, [])
+
+  const prepareAudioFromTap = useCallback(async () => {
+    recordAudioDiagnostic('tap')
+
+    try {
+      if (navigator.audioSession && 'type' in navigator.audioSession) navigator.audioSession.type = 'playback'
+    } catch (error) {
+      recordAudioDiagnostic('audio-session-warning', { message: error?.message || String(error) })
+    }
+
+    // iOSではユーザー操作が有効な間に、HTMLMediaElementとWeb Audioの
+    // 両方を開始する。先にawaitすると消音のままrunningになる場合がある。
+    const mediaStart = openMediaAudioChannel()
+    const toneStart = Tone.start()
+    const [mediaResult, toneResult] = await Promise.allSettled([mediaStart, toneStart])
+    recordAudioDiagnostic('unlock-result', {
+      media: mediaResult.status,
+      mediaMessage: mediaResult.reason?.message || '',
+      tone: toneResult.status,
+      toneMessage: toneResult.reason?.message || '',
+      audioSession: navigator.audioSession?.type || 'unsupported',
+    })
+    if (toneResult.status === 'rejected') throw toneResult.reason
+  }, [openMediaAudioChannel, recordAudioDiagnostic])
+
   const initAudio = useCallback(async () => {
     await Tone.start()
     const context = Tone.getContext()
-    if (context.state !== 'running') await context.resume()
-    if (context.state !== 'running') throw new Error('音声を開始できませんでした')
+    const rawContext = context.rawContext || context._context
+    if (rawContext?.state !== 'running') await rawContext?.resume()
+    if (context.state !== 'running' || (rawContext?.state && rawContext.state !== 'running')) {
+      throw new Error(`音声を開始できませんでした (${context.state}/${rawContext?.state || 'unknown'})`)
+    }
     if (instrumentsRef.current) return
 
     const piano = new Tone.PolySynth(Tone.Synth, {
@@ -231,7 +335,8 @@ function App() {
     lead.volume.value = -12
 
     instrumentsRef.current = { piano, bass, kick, snare, hat, lead }
-  }, [])
+    recordAudioDiagnostic('instruments-ready')
+  }, [recordAudioDiagnostic])
 
   const configureTransport = useCallback(() => {
     const instruments = instrumentsRef.current
@@ -252,7 +357,13 @@ function App() {
       const root = Chord.get(chordName).tonic || normalizePc(chordName)
       const bassNote = `${root}2`
 
-      Tone.Transport.schedule((time) => instruments.piano.triggerAttackRelease(voicing, '2n', time, 0.62), `${bar}:0:0`)
+      Tone.Transport.schedule((time) => {
+        if (!firstTransportEventRef.current) {
+          firstTransportEventRef.current = true
+          recordAudioDiagnostic('first-transport-event', { scheduledTime: Number(time).toFixed(3) })
+        }
+        instruments.piano.triggerAttackRelease(voicing, '2n', time, 0.62)
+      }, `${bar}:0:0`)
 
       ;[0, 2].forEach((beat) => {
         Tone.Transport.schedule((time) => instruments.bass.triggerAttackRelease(bassNote, '8n', time, 0.8), `${bar}:${beat}:0`)
@@ -276,7 +387,8 @@ function App() {
     })
 
     Tone.Transport.start('+0.04')
-  }, [bpm, melodies, progression, selectedMelody])
+    recordAudioDiagnostic('transport-start-requested', { chords: progression.length, bpm })
+  }, [bpm, melodies, progression, recordAudioDiagnostic, selectedMelody])
 
   useEffect(() => {
     Tone.Transport.bpm.rampTo(bpm, 0.05)
@@ -293,14 +405,23 @@ function App() {
   useEffect(() => () => {
     Tone.Transport.stop()
     Tone.Transport.cancel(0)
+    if (playbackWatchdogRef.current) window.clearTimeout(playbackWatchdogRef.current)
     if (instrumentsRef.current) Object.values(instrumentsRef.current).forEach((instrument) => instrument.dispose())
+    if (mediaUnlockRef.current) {
+      mediaUnlockRef.current.audio.pause()
+      mediaUnlockRef.current.audio.remove()
+      URL.revokeObjectURL(mediaUnlockRef.current.url)
+    }
   }, [])
 
   const stopPlayback = () => {
     Tone.Transport.stop()
     Tone.Transport.cancel(0)
+    if (playbackWatchdogRef.current) window.clearTimeout(playbackWatchdogRef.current)
+    mediaUnlockRef.current?.audio.pause()
     setIsPlaying(false)
     setPlaybackError('')
+    recordAudioDiagnostic('stopped')
   }
 
   const resetForHarmonyChange = (nextKey = keyName, nextMode = mode) => {
@@ -347,16 +468,52 @@ function App() {
     }
     setPlaybackError('')
     try {
-      // iPhone SafariではAudioContextの解除とTransport開始を、同じタップ処理の
-      // 中で完了させる必要がある。state/useEffectを経由させない。
+      firstTransportEventRef.current = false
+      await prepareAudioFromTap()
       await initAudio()
       configureTransport()
       setIsPlaying(true)
+      playbackWatchdogRef.current = window.setTimeout(() => {
+        const eventReceived = firstTransportEventRef.current
+        recordAudioDiagnostic('watchdog', { eventReceived })
+        if (!eventReceived) setPlaybackError('再生イベントが開始されていません。下の音声診断ログをコピーして送ってください。')
+      }, 900)
     } catch (error) {
       Tone.Transport.stop()
       Tone.Transport.cancel(0)
       setIsPlaying(false)
       setPlaybackError(`${error?.message || '音声を開始できなかった'}。もう一度タップしてみて。`)
+      recordAudioDiagnostic('playback-error', { message: error?.message || String(error) })
+    }
+  }
+
+  const playDiagnosticTone = async () => {
+    setPlaybackError('')
+    try {
+      await prepareAudioFromTap()
+      await initAudio()
+      instrumentsRef.current.lead.triggerAttackRelease('C5', '4n', Tone.now() + 0.02, 0.85)
+      recordAudioDiagnostic('test-tone-triggered', { note: 'C5' })
+    } catch (error) {
+      setPlaybackError(`${error?.message || 'テスト音を開始できなかった'}。`)
+      recordAudioDiagnostic('test-tone-error', { message: error?.message || String(error) })
+    }
+  }
+
+  const copyAudioDiagnostics = async () => {
+    const payload = {
+      app: 'makemusic v0.2.1',
+      page: window.location.href,
+      userAgent: navigator.userAgent,
+      visibility: document.visibilityState,
+      logs: audioDiagnostics,
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+      setCopyStatus('コピー済み')
+      window.setTimeout(() => setCopyStatus('ログをコピー'), 1600)
+    } catch {
+      setCopyStatus('コピーできませんでした')
     }
   }
 
@@ -634,6 +791,23 @@ function App() {
             </button>
             {playbackError && <p className="error-text" role="alert">{playbackError}</p>}
             <p className="microcopy">Piano + Bass + Drum。コード追加やBPM変更も再生に反映。</p>
+            <details className="audio-diagnostics">
+              <summary>音が出ない場合：音声診断</summary>
+              <p>まず「テスト音」を押して、短い高音が聞こえるか確認してください。</p>
+              <div className="diagnostic-actions">
+                <button type="button" onClick={playDiagnosticTone}>テスト音を鳴らす</button>
+                <button type="button" onClick={copyAudioDiagnostics} disabled={!audioDiagnostics.length}>{copyStatus}</button>
+              </div>
+              <div className="diagnostic-log" aria-live="polite">
+                {audioDiagnostics.length ? audioDiagnostics.slice(-8).map((entry, index) => (
+                  <code key={`${entry.at}-${entry.event}-${index}`}>
+                    {entry.at} {entry.event} · ctx:{entry.rawContext || '?'} · tr:{entry.transport || '?'}
+                    {entry.eventReceived === false ? ' · event:NO' : ''}
+                  </code>
+                )) : <span>まだログはありません</span>}
+              </div>
+              <p className="diagnostic-note">ログはこの端末内だけに表示され、外部へ自動送信されません。</p>
+            </details>
           </section>
 
           <section className="panel melody-panel">
@@ -654,7 +828,7 @@ function App() {
         </>
       )}
 
-      <footer>v0.2 · static only · Vercel Functions 0 · Tone.js + Tonal.js + Songle</footer>
+      <footer>v0.2.1 · static only · Vercel Functions 0 · Tone.js + Tonal.js + Songle</footer>
     </main>
   )
 }
