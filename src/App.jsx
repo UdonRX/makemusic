@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Tone from 'tone'
 import { Chord, Scale } from 'tonal'
-import { aggregateMusicDna, analyzeSongleReference, searchSongleSongs } from './music/referenceAnalysis'
+import { aggregateMusicDna, analysisFromUploadedAudio, analyzeSongleReference, searchSongleSongs } from './music/referenceAnalysis'
+import { searchMusicBrainzArtists } from './music/artistSearch'
+import { analyzeAudioFileLocally } from './music/audioAnalysis'
+import { analyzeWithZeroGpu, getZeroGpuSpaceId, saveZeroGpuSpaceId } from './music/zeroGpuClient'
+import { BASS_PRESETS, createLocalBlueprint, DRUM_PRESETS, requestSongBlueprint } from './music/songBlueprint'
 
 const KEYS = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 const MAX_CHORDS = 8
@@ -142,12 +146,16 @@ function chordVoicing(chordName) {
   })
 }
 
-function progressionFromDna(dna, targetKey) {
-  const chords = getDiatonicChords(targetKey, dna.harmony.mode)
-  const degrees = dna.harmony.signatureDegrees.filter((degree) => degree >= 0 && degree < chords.length)
-  const base = degrees.length >= 3 ? degrees : dna.harmony.mode === 'minor' ? [0, 5, 3, 4] : [0, 4, 5, 3]
-  const expanded = [...base, ...base]
-  return expanded.slice(0, MAX_CHORDS).map((degree) => chords[degree]).filter(Boolean)
+function progressionFromBlueprint(blueprint, targetKey) {
+  const chords = getDiatonicChords(targetKey, blueprint.key.mode)
+  const degrees = blueprint.harmony.degreePattern.filter((degree) => degree >= 0 && degree < chords.length)
+  const base = degrees.length >= 3 ? degrees : blueprint.key.mode === 'minor' ? [0, 5, 3, 4] : [0, 4, 5, 3]
+  return Array.from({ length: MAX_CHORDS }, (_, index) => chords[base[index % base.length]]).filter(Boolean)
+}
+
+function cloneDrumPreset(name = 'pop') {
+  const preset = DRUM_PRESETS[name] || DRUM_PRESETS.pop
+  return { kick: [...preset.kick], snare: [...preset.snare], hat: [...preset.hat] }
 }
 
 function createSilentWavUrl() {
@@ -190,15 +198,29 @@ function App() {
   const [audioDiagnostics, setAudioDiagnostics] = useState([])
   const [copyStatus, setCopyStatus] = useState('ログをコピー')
   const [activeDna, setActiveDna] = useState(null)
+  const [drumPreset, setDrumPreset] = useState('pop')
+  const [drumPattern, setDrumPattern] = useState(() => cloneDrumPreset('pop'))
+  const [bassPreset, setBassPreset] = useState('halfNotes')
+  const [bassOctave, setBassOctave] = useState(2)
+  const [melodyEditBar, setMelodyEditBar] = useState(0)
 
   const [referenceQuery, setReferenceQuery] = useState('')
   const [referenceResults, setReferenceResults] = useState([])
+  const [artistResults, setArtistResults] = useState([])
+  const [selectedArtist, setSelectedArtist] = useState(null)
   const [selectedReferences, setSelectedReferences] = useState([])
+  const [audioFiles, setAudioFiles] = useState([])
+  const [zeroGpuSpaceId, setZeroGpuSpaceId] = useState(() => getZeroGpuSpaceId())
   const [referenceLoading, setReferenceLoading] = useState(false)
   const [referenceStatus, setReferenceStatus] = useState('')
   const [referenceError, setReferenceError] = useState('')
   const [targetDurationSec, setTargetDurationSec] = useState(120)
   const [musicDna, setMusicDna] = useState(null)
+  const [songIntent, setSongIntent] = useState('')
+  const [blueprint, setBlueprint] = useState(null)
+  const [plannerLoading, setPlannerLoading] = useState(false)
+  const [plannerStatus, setPlannerStatus] = useState('')
+  const [plannerWarning, setPlannerWarning] = useState('')
 
   const instrumentsRef = useRef(null)
   const mediaUnlockRef = useRef(null)
@@ -351,11 +373,11 @@ function App() {
     Tone.Transport.loopEnd = `${progression.length}m`
 
     const activeMelody = melodies[selectedMelody] || []
+    const bassConfig = BASS_PRESETS[bassPreset] || BASS_PRESETS.halfNotes
 
     progression.forEach((chordName, bar) => {
       const voicing = chordVoicing(chordName)
       const root = Chord.get(chordName).tonic || normalizePc(chordName)
-      const bassNote = `${root}2`
 
       Tone.Transport.schedule((time) => {
         if (!firstTransportEventRef.current) {
@@ -365,20 +387,27 @@ function App() {
         instruments.piano.triggerAttackRelease(voicing, '2n', time, 0.62)
       }, `${bar}:0:0`)
 
-      ;[0, 2].forEach((beat) => {
-        Tone.Transport.schedule((time) => instruments.bass.triggerAttackRelease(bassNote, '8n', time, 0.8), `${bar}:${beat}:0`)
-        Tone.Transport.schedule((time) => instruments.kick.triggerAttackRelease('C1', '8n', time, 0.9), `${bar}:${beat}:0`)
+      bassConfig.steps.forEach((step) => {
+        const octave = bassOctave + (bassConfig.octaveSteps.includes(step) ? 1 : 0)
+        const position = `${bar}:${Math.floor(step / 4)}:${step % 4}`
+        Tone.Transport.schedule((time) => instruments.bass.triggerAttackRelease(`${root}${octave}`, '16n', time, 0.78), position)
       })
 
-      ;[1, 3].forEach((beat) => {
-        Tone.Transport.schedule((time) => instruments.snare.triggerAttackRelease('16n', time, 0.5), `${bar}:${beat}:0`)
+      ;['kick', 'snare', 'hat'].forEach((part) => {
+        drumPattern[part].forEach((enabled, step) => {
+          if (!enabled) return
+          const position = `${bar}:${Math.floor(step / 4)}:${step % 4}`
+          Tone.Transport.schedule((time) => {
+            if (part === 'kick') instruments.kick.triggerAttackRelease('C1', '8n', time, 0.9)
+            else if (part === 'snare') instruments.snare.triggerAttackRelease('16n', time, 0.5)
+            else instruments.hat.triggerAttackRelease('32n', time, 0.24)
+          }, position)
+        })
       })
 
       for (let eighth = 0; eighth < 8; eighth += 1) {
         const beat = Math.floor(eighth / 2)
         const sixteenth = eighth % 2 === 0 ? 0 : 2
-        Tone.Transport.schedule((time) => instruments.hat.triggerAttackRelease('32n', time, 0.24), `${bar}:${beat}:${sixteenth}`)
-
         const melodyNote = activeMelody[bar * 8 + eighth]
         if (melodyNote) {
           Tone.Transport.schedule((time) => instruments.lead.triggerAttackRelease(melodyNote, '8n', time, 0.52), `${bar}:${beat}:${sixteenth}`)
@@ -388,7 +417,7 @@ function App() {
 
     Tone.Transport.start('+0.04')
     recordAudioDiagnostic('transport-start-requested', { chords: progression.length, bpm })
-  }, [bpm, melodies, progression, recordAudioDiagnostic, selectedMelody])
+  }, [bassOctave, bassPreset, bpm, drumPattern, melodies, progression, recordAudioDiagnostic, selectedMelody])
 
   useEffect(() => {
     Tone.Transport.bpm.rampTo(bpm, 0.05)
@@ -400,7 +429,7 @@ function App() {
     // isPlaying を依存配列へ加えると、iOSでユーザー操作後のEffectから
     // Transportを開始する経路へ戻るため、編集値だけを監視する。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bpm, melodies, progression, selectedMelody])
+  }, [bassOctave, bassPreset, bpm, drumPattern, melodies, progression, selectedMelody])
 
   useEffect(() => () => {
     Tone.Transport.stop()
@@ -441,6 +470,10 @@ function App() {
     setMelodies([[], [], []])
   }
 
+  const replaceChord = (index, chord) => {
+    setProgression((current) => current.map((item, itemIndex) => itemIndex === index ? chord : item))
+  }
+
   const undoChord = () => {
     setProgression((current) => current.slice(0, -1))
     setMelodies([[], [], []])
@@ -458,6 +491,39 @@ function App() {
     if (!progression.length) return
     setMelodies(MELODY_LABELS.map(() => generateMelody(keyName, mode, progression, activeDna?.melody)))
     setSelectedMelody(0)
+    setMelodyEditBar(0)
+  }
+
+  const chooseDrumPreset = (name) => {
+    setDrumPreset(name)
+    setDrumPattern(cloneDrumPreset(name))
+  }
+
+  const toggleDrumStep = (part, step) => {
+    setDrumPreset('custom')
+    setDrumPattern((current) => ({
+      ...current,
+      [part]: current[part].map((value, index) => index === step ? (value ? 0 : 1) : value),
+    }))
+  }
+
+  const editMelodyNote = (step, action) => {
+    const noteIndex = melodyEditBar * 8 + step
+    const scalePcs = Scale.get(`${keyName} ${mode}`).notes
+    const pool = midiPoolForPitchClasses(scalePcs, 48, 84)
+    setMelodies((current) => current.map((melody, melodyIndex) => {
+      if (melodyIndex !== selectedMelody) return melody
+      const next = [...melody]
+      if (action === 'rest') next[noteIndex] = null
+      else {
+        const currentMidi = next[noteIndex] ? Tone.Frequency(next[noteIndex]).toMidi() : Tone.Frequency(`${keyName}4`).toMidi()
+        const candidate = action === 'up'
+          ? pool.find((midi) => midi > currentMidi) ?? pool[pool.length - 1]
+          : [...pool].reverse().find((midi) => midi < currentMidi) ?? pool[0]
+        next[noteIndex] = Tone.Frequency(candidate, 'midi').toNote()
+      }
+      return next
+    }))
   }
 
   const togglePlayback = async () => {
@@ -502,7 +568,7 @@ function App() {
 
   const copyAudioDiagnostics = async () => {
     const payload = {
-      app: 'makemusic v0.2.1',
+      app: 'makemusic v0.3.0',
       page: window.location.href,
       userAgent: navigator.userAgent,
       visibility: document.visibilityState,
@@ -519,11 +585,22 @@ function App() {
 
   const addReference = (song) => {
     setSelectedReferences((current) => {
-      if (current.some((item) => item.id === song.id || item.permalink === song.permalink) || current.length >= 3) return current
+      if (current.some((item) => item.id === song.id || item.permalink === song.permalink) || current.length + audioFiles.length >= 3) return current
       return [...current, song]
     })
     setMusicDna(null)
+    setBlueprint(null)
     setReferenceError('')
+  }
+
+  const selectAudioFiles = (event) => {
+    const incoming = [...(event.target.files || [])]
+    const available = Math.max(0, 3 - selectedReferences.length)
+    setAudioFiles(incoming.slice(0, available))
+    setMusicDna(null)
+    setBlueprint(null)
+    setReferenceError(incoming.length > available ? '参考データはSongle曲と音源を合わせて最大3件です。' : '')
+    event.target.value = ''
   }
 
   const runReferenceSearch = async (event) => {
@@ -547,13 +624,19 @@ function App() {
     }
 
     setReferenceLoading(true)
-    setReferenceStatus('Songleで検索中…')
+    setReferenceStatus('MusicBrainzとSongleで検索中…')
     try {
-      const results = await searchSongleSongs(query)
-      setReferenceResults(results)
-      if (!results.length) setReferenceError('Songleで候補が見つからなかった。YouTube / ニコニコのURLを直接貼る方法も使える。')
-    } catch (error) {
-      setReferenceError(`検索できなかった: ${error.message}`)
+      const [songs, artists] = await Promise.allSettled([
+        searchSongleSongs(query),
+        searchMusicBrainzArtists(query),
+      ])
+      const songResults = songs.status === 'fulfilled' ? songs.value : []
+      const artistMatches = artists.status === 'fulfilled' ? artists.value : []
+      setReferenceResults(songResults)
+      setArtistResults(artistMatches)
+      if (artistMatches.length) setSelectedArtist(artistMatches[0])
+      if (!songResults.length && !artistMatches.length) setReferenceError('候補が見つからなかった。権利を持つ音源ファイルを追加する方法も使えます。')
+      else if (songs.status === 'rejected' || artists.status === 'rejected') setReferenceError('一部の検索先へ接続できませんでした。表示された候補はそのまま使えます。')
     } finally {
       setReferenceLoading(false)
       setReferenceStatus('')
@@ -561,43 +644,79 @@ function App() {
   }
 
   const analyzeReferences = async () => {
-    if (!selectedReferences.length) return
+    if (!selectedReferences.length && !audioFiles.length) return
     setReferenceLoading(true)
     setReferenceError('')
     setMusicDna(null)
+    setBlueprint(null)
 
     try {
       const analyses = []
       for (let index = 0; index < selectedReferences.length; index += 1) {
-        setReferenceStatus(`${index + 1} / ${selectedReferences.length} 曲を解析中…`)
+        setReferenceStatus(`Songle ${index + 1} / ${selectedReferences.length} 曲を解析中…`)
         analyses.push(await analyzeSongleReference(selectedReferences[index]))
       }
-      const dna = aggregateMusicDna(analyses, targetDurationSec)
+      let zeroGpuUsed = false
+      let zeroGpuWarning = ''
+      for (let index = 0; index < audioFiles.length; index += 1) {
+        const file = audioFiles[index]
+        const local = await analyzeAudioFileLocally(file, setReferenceStatus)
+        let remote = null
+        if (!zeroGpuUsed && zeroGpuSpaceId) {
+          try {
+            remote = await analyzeWithZeroGpu(local.wavBlob, file.name, setReferenceStatus, zeroGpuSpaceId)
+            zeroGpuUsed = true
+          } catch (error) {
+            zeroGpuWarning = `ZeroGPUは利用できませんでした（${error.message}）。Essentia.jsの結果だけで続行しました。`
+          }
+        }
+        analyses.push(analysisFromUploadedAudio(local, remote))
+      }
+      const dna = aggregateMusicDna(analyses, targetDurationSec, selectedArtist || artistResults[0] || null)
       setMusicDna(dna)
-      setReferenceStatus('解析完了')
+      setReferenceStatus(zeroGpuWarning || 'Music DNA解析完了')
     } catch (error) {
-      setReferenceError(`${error.message}。Songleに解析済みの曲を選ぶか、別の参考曲を試してみて。`)
+      setReferenceError(`${error.message}。別の参考曲か、30秒解析できる音源を試してください。`)
       setReferenceStatus('')
     } finally {
       setReferenceLoading(false)
     }
   }
 
-  const applyMusicDna = () => {
+  const generateBlueprint = async () => {
     if (!musicDna) return
-    const targetKey = KEYS.includes(musicDna.harmony.tonic) ? musicDna.harmony.tonic : keyName
-    const nextMode = musicDna.harmony.mode
-    const nextProgression = progressionFromDna(musicDna, targetKey)
+    setPlannerLoading(true)
+    setPlannerWarning('')
+    setPlannerStatus('GeminiへMusic DNAだけを送信中…')
+    const result = await requestSongBlueprint(musicDna, songIntent)
+    setBlueprint(result.blueprint)
+    setPlannerStatus(result.status)
+    setPlannerWarning(result.warning)
+    setPlannerLoading(false)
+  }
+
+  const applyBlueprint = () => {
+    if (!musicDna) return
+    const activeBlueprint = blueprint || createLocalBlueprint(musicDna, songIntent)
+    const targetKey = KEYS.includes(activeBlueprint.key.tonic) ? activeBlueprint.key.tonic
+      : KEYS.includes(musicDna.harmony.tonic) ? musicDna.harmony.tonic : keyName
+    const nextMode = activeBlueprint.key.mode
+    const nextProgression = progressionFromBlueprint(activeBlueprint, targetKey)
     if (!nextProgression.length) return
 
     if (isPlaying) stopPlayback()
     setKeyName(targetKey)
     setMode(nextMode)
-    setBpm(musicDna.rhythm.bpm)
+    setBpm(activeBlueprint.bpm)
     setProgression(nextProgression)
-    setActiveDna(musicDna)
-    setMelodies(MELODY_LABELS.map(() => generateMelody(targetKey, nextMode, nextProgression, musicDna.melody)))
+    const melodyProfile = activeBlueprint.tracks.melody
+    setActiveDna({ ...musicDna, melody: melodyProfile, blueprint: activeBlueprint })
+    setMelodies(MELODY_LABELS.map(() => generateMelody(targetKey, nextMode, nextProgression, melodyProfile)))
+    chooseDrumPreset(activeBlueprint.tracks.drums.preset)
+    setBassPreset(activeBlueprint.tracks.bass.preset)
+    setBassOctave(activeBlueprint.tracks.bass.octave)
     setSelectedMelody(0)
+    setMelodyEditBar(0)
     setWorkspace('create')
   }
 
@@ -620,31 +739,50 @@ function App() {
         <>
           <section className="panel reference-intro">
             <div className="section-head">
-              <span>REFERENCE ANALYSIS</span>
-              <strong>完全無料モード</strong>
+              <span>LAYER 1 · ARTIST</span>
+              <strong>MusicBrainz + Songle</strong>
             </div>
-            <p className="reference-lead">アーティスト名や曲名で探して、最大3曲の「コード・テンポ・メロディ・構成」の共通点をMusic DNAにする。</p>
+            <p className="reference-lead">アーティスト情報と解析済み楽曲を探し、必要なら権利を持つ音源の代表30秒を追加する。</p>
             <form className="reference-search" onSubmit={runReferenceSearch}>
               <input
                 type="search"
                 value={referenceQuery}
                 onChange={(event) => setReferenceQuery(event.target.value)}
-                placeholder="例：サカナクション / 新宝島 / YouTube URL"
+                placeholder="例：サカナクション / 新宝島"
                 aria-label="参考曲を検索"
               />
               <button disabled={referenceLoading || !referenceQuery.trim()}>探す</button>
             </form>
-            <p className="microcopy">Songleの公開解析結果をブラウザから直接取得。音源ファイルをVercelへ送らず、Vercel Functionも使わない。</p>
+            <p className="microcopy">MusicBrainzはメタデータ、Songleはコード・Beat・メロディ・構成を取得。SpotifyやYouTubeから音源を抜き出しません。</p>
           </section>
+
+          {artistResults.length > 0 && (
+            <section className="panel">
+              <div className="section-head"><span>ARTIST MATCH</span><span>{selectedArtist ? '1件選択' : '未選択'}</span></div>
+              <div className="artist-results">
+                {artistResults.map((artist) => (
+                  <button key={artist.id} className={`artist-card ${selectedArtist?.id === artist.id ? 'selected' : ''}`} onClick={() => {
+                    setSelectedArtist(artist)
+                    setMusicDna(null)
+                    setBlueprint(null)
+                  }}>
+                    <strong>{artist.name}</strong>
+                    <small>{[artist.country, artist.type, artist.disambiguation].filter(Boolean).join(' · ') || 'MusicBrainz artist'}</small>
+                    {artist.tags?.length > 0 && <span>{artist.tags.slice(0, 4).join(' / ')}</span>}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
 
           {referenceResults.length > 0 && (
             <section className="panel">
-              <div className="section-head"><span>SEARCH RESULTS</span><span>最大3曲</span></div>
+              <div className="section-head"><span>SONGLE TRACKS</span><span>全データ合計3件</span></div>
               <div className="reference-results">
                 {referenceResults.map((song) => {
                   const selected = selectedReferences.some((item) => item.id === song.id || item.permalink === song.permalink)
                   return (
-                    <button key={song.id} className={`reference-result ${selected ? 'selected' : ''}`} onClick={() => addReference(song)} disabled={!selected && selectedReferences.length >= 3}>
+                    <button key={song.id} className={`reference-result ${selected ? 'selected' : ''}`} onClick={() => addReference(song)} disabled={!selected && selectedReferences.length + audioFiles.length >= 3}>
                       <span className="reference-result-copy">
                         <strong>{song.title}</strong>
                         <small>{song.artist} · {formatDuration(song.durationMs / 1000)}</small>
@@ -657,9 +795,33 @@ function App() {
             </section>
           )}
 
+          <section className="panel upload-panel">
+            <div className="section-head"><span>OWNED AUDIO · OPTIONAL</span><span>Essentia.js + ZeroGPU</span></div>
+            <label className="file-picker">
+              <input type="file" accept="audio/*,.mp3,.m4a,.wav,.flac,.ogg" multiple onChange={selectAudioFiles} disabled={selectedReferences.length >= 3} />
+              <b>＋ 音源を選ぶ</b>
+              <small>MP3 / M4A / WAV · 各12MB・10分以内 · 中央30秒だけ解析</small>
+            </label>
+            <details className="worker-settings">
+              <summary>Hugging Face ZeroGPU接続</summary>
+              <label>
+                <span>公開Space ID</span>
+                <input value={zeroGpuSpaceId} placeholder="owner/makemusic-audio-dna" onChange={(event) => setZeroGpuSpaceId(event.target.value)} onBlur={() => {
+                  try {
+                    setZeroGpuSpaceId(saveZeroGpuSpaceId(zeroGpuSpaceId))
+                    setReferenceError('')
+                  } catch (error) {
+                    setReferenceError(error.message)
+                  }
+                }} />
+              </label>
+              <p>トークンは保存しません。未接続・混雑・無料枠終了時はEssentia.jsだけで続行します。</p>
+            </details>
+          </section>
+
           <section className="panel">
-            <div className="section-head"><span>SELECTED</span><span>{selectedReferences.length} / 3</span></div>
-            {selectedReferences.length ? (
+            <div className="section-head"><span>ANALYSIS INPUT</span><span>{selectedReferences.length + audioFiles.length} / 3</span></div>
+            {selectedReferences.length || audioFiles.length ? (
               <div className="selected-references">
                 {selectedReferences.map((song, index) => (
                   <div className="selected-reference" key={song.id}>
@@ -668,22 +830,35 @@ function App() {
                     <button aria-label={`${song.title}を外す`} onClick={() => {
                       setSelectedReferences((current) => current.filter((item) => item.id !== song.id))
                       setMusicDna(null)
+                      setBlueprint(null)
+                    }}>×</button>
+                  </div>
+                ))}
+                {audioFiles.map((file, index) => (
+                  <div className="selected-reference uploaded" key={`${file.name}-${file.size}-${index}`}>
+                    <span className="reference-number">A{index + 1}</span>
+                    <div><strong>{file.name}</strong><small>所有音源 · {(file.size / 1024 / 1024).toFixed(1)}MB</small></div>
+                    <button aria-label={`${file.name}を外す`} onClick={() => {
+                      setAudioFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))
+                      setMusicDna(null)
+                      setBlueprint(null)
                     }}>×</button>
                   </div>
                 ))}
               </div>
-            ) : <div className="reference-empty">上の検索から参考曲を1〜3曲選ぶ</div>}
+            ) : <div className="reference-empty">Songle曲または所有音源を1〜3件選ぶ</div>}
 
             <div className="target-length">
               <div><span>作りたい長さ</span><strong>{formatDuration(targetDurationSec)}</strong></div>
               <input type="range" min="60" max="240" step="15" value={targetDurationSec} onChange={(event) => {
                 setTargetDurationSec(Number(event.target.value))
                 setMusicDna(null)
+                setBlueprint(null)
               }} />
             </div>
 
-            <button className="analyze-button" onClick={analyzeReferences} disabled={referenceLoading || !selectedReferences.length}>
-              {referenceLoading ? referenceStatus || '解析中…' : '✦ 参考曲を解析する'}
+            <button className="analyze-button" onClick={analyzeReferences} disabled={referenceLoading || (!selectedReferences.length && !audioFiles.length)}>
+              {referenceLoading ? referenceStatus || '解析中…' : '✦ Music DNAを解析する'}
             </button>
             {referenceStatus && !referenceLoading && <p className="success-text">{referenceStatus}</p>}
             {referenceError && <p className="error-text">{referenceError}</p>}
@@ -692,7 +867,7 @@ function App() {
           {musicDna && (
             <>
               <section className="panel dna-panel">
-                <div className="section-head"><span>MUSIC DNA</span><strong>{musicDna.references.length}曲から抽出</strong></div>
+                <div className="section-head"><span>MUSIC DNA · FACTS</span><strong>v{musicDna.schemaVersion}</strong></div>
                 <div className="dna-grid">
                   <div><small>BPM</small><strong>{musicDna.rhythm.bpm}</strong></div>
                   <div><small>KEY傾向</small><strong>{musicDna.harmony.tonic} {musicDna.harmony.mode}</strong></div>
@@ -701,6 +876,13 @@ function App() {
                   <div><small>モチーフ反復</small><strong>{Math.round(musicDna.melody.repetitionRatio * 100)}%</strong></div>
                   <div><small>コード密度</small><strong>{musicDna.rhythm.chordChangesPerMinute}/分</strong></div>
                 </div>
+                <div className="provider-badges">
+                  <span className={musicDna.artist ? 'ready' : ''}>MusicBrainz</span>
+                  <span className={selectedReferences.length ? 'ready' : ''}>Songle</span>
+                  <span className={musicDna.audioFeatures ? 'ready' : ''}>Essentia.js</span>
+                  <span className={musicDna.stems ? 'ready' : ''}>Demucs</span>
+                  <span className={musicDna.stems ? 'ready' : ''}>Basic Pitch</span>
+                </div>
                 <div className="degree-row">
                   <small>特徴的なコード度数</small>
                   <div>{musicDna.harmony.signatureDegrees.map((degree, index) => <span key={`${degree}-${index}`}>{degree + 1}</span>)}</div>
@@ -708,28 +890,43 @@ function App() {
               </section>
 
               <section className="panel blueprint-panel">
-                <div className="section-head"><span>SONG BLUEPRINT</span><strong>{formatDuration(musicDna.targetDurationSec)}</strong></div>
+                <div className="section-head"><span>LAYER 2 · AI BLUEPRINT</span><strong>{formatDuration(musicDna.targetDurationSec)}</strong></div>
+                <textarea className="intent-input" value={songIntent} onChange={(event) => {
+                  setSongIntent(event.target.value)
+                  setBlueprint(null)
+                }} maxLength="240" placeholder="例：夜に合う、踊れる、サビは開放的。特定曲のコピーはしない。" />
+                <button className="planner-button" onClick={generateBlueprint} disabled={plannerLoading}>
+                  {plannerLoading ? '設計図を作成中…' : '✦ Geminiで曲の設計図を作る'}
+                </button>
+                {plannerStatus && <p className="success-text">{plannerStatus}</p>}
+                {plannerWarning && <p className="warning-text">{plannerWarning}</p>}
                 <div className="section-track">
-                  {musicDna.structure.sections.map((section, index) => (
+                  {(blueprint?.sections || musicDna.structure.sections).map((section, index) => (
                     <div key={`${section.name}-${index}`} className="section-block" style={{ flexGrow: section.bars }}>
-                      <strong>{section.name}</strong><small>{section.bars} bars</small>
+                      <strong>{section.name}</strong><small>{section.bars} bars{section.energy ? ` · ${Math.round(section.energy * 100)}%` : ''}</small>
                     </div>
                   ))}
                 </div>
-                <p className="microcopy">今は無料のルールベース設計図。将来ここをAI Plannerへ差し替え、Demucs / Basic Pitch / Essentiaの楽器・リズム解析も同じMusic DNAへ追加する。</p>
-                <button className="apply-dna-button" onClick={applyMusicDna}>この特徴で曲を作る →</button>
+                {blueprint && <div className="blueprint-summary">
+                  <span>{blueprint.bpm} BPM</span>
+                  <span>{blueprint.key.tonic} {blueprint.key.mode}</span>
+                  <span>{DRUM_PRESETS[blueprint.tracks.drums.preset]?.label}</span>
+                  <span>{BASS_PRESETS[blueprint.tracks.bass.preset]?.label}</span>
+                </div>}
+                <p className="microcopy">Geminiへ送るのはMusic DNA JSONだけで、音源そのものは送りません。無料枠切れ時は同じ形式のローカル設計図へ自動切替。</p>
+                <button className="apply-dna-button" onClick={applyBlueprint} disabled={!blueprint}>編集可能トラックへ変換 →</button>
               </section>
 
               <section className="panel pipeline-panel">
-                <div className="section-head"><span>3 LAYER PIPELINE</span><span>将来拡張</span></div>
+                <div className="section-head"><span>3 LAYER PIPELINE</span><span>実装済み</span></div>
                 <div className="pipeline-steps">
-                  <div><b>1</b><span><strong>アーティスト情報</strong><small>Songle · 稼働中</small></span></div>
+                  <div><b>1</b><span><strong>アーティスト情報</strong><small>MusicBrainz · Songle</small></span></div>
                   <i>→</i>
-                  <div><b>2</b><span><strong>曲の設計図</strong><small>Local Rules → AI</small></span></div>
+                  <div><b>2</b><span><strong>曲の設計図</strong><small>Gemini · fallback</small></span></div>
                   <i>→</i>
-                  <div><b>3</b><span><strong>編集可能トラック</strong><small>Tone.js · 稼働中</small></span></div>
+                  <div><b>3</b><span><strong>編集可能トラック</strong><small>Chord · Drum · Bass · Melody</small></span></div>
                 </div>
-                <p className="microcopy">Demucs＝楽器分離、Basic Pitch＝音符化、Essentia＝音響特徴。無料で実行できる方法が確認できたものから順に接続する。</p>
+                <p className="microcopy">Vercelは静的UIと小さなPlanner API 1本だけ。Demucs / Basic PitchはZeroGPU、Essentia.jsは端末内で動作。</p>
               </section>
             </>
           )}
@@ -766,7 +963,13 @@ function App() {
             <div className="section-head"><span>CHORDS</span><span>{progression.length} / {MAX_CHORDS}</span></div>
             <div className={`progression ${progression.length ? '' : 'empty'}`}>
               {progression.length ? progression.map((chord, index) => (
-                <div className="progression-chip" key={`${chord}-${index}`}><small>{index + 1}</small><strong>{displayChord(chord)}</strong></div>
+                <label className="progression-chip editable" key={`${index}-${chord}`}>
+                  <small>{index + 1}</small>
+                  <strong>{displayChord(chord)}</strong>
+                  <select aria-label={`${index + 1}番目のコード`} value={chord} onChange={(event) => replaceChord(index, event.target.value)}>
+                    {diatonicChords.map((option) => <option key={option} value={option}>{displayChord(option)}</option>)}
+                  </select>
+                </label>
               )) : <p>下の候補から最初のコードを選ぶ</p>}
             </div>
             <div className="utility-row">
@@ -783,6 +986,44 @@ function App() {
               )) : <div className="max-message">8コードできた。まず鳴らしてみよう。</div>}
             </div>
           </section>
+
+          {progression.length > 0 && (
+            <section className="panel track-editor-panel">
+              <div className="section-head"><span>EDITABLE TRACKS</span><span>再生へ即時反映</span></div>
+
+              <div className="track-editor-block">
+                <div className="track-editor-head"><strong>DRUM</strong><small>16 steps</small></div>
+                <div className="preset-tabs">
+                  {Object.entries(DRUM_PRESETS).map(([name, preset]) => (
+                    <button key={name} className={drumPreset === name ? 'active' : ''} onClick={() => chooseDrumPreset(name)}>{preset.label}</button>
+                  ))}
+                </div>
+                <div className="drum-grid">
+                  {['kick', 'snare', 'hat'].map((part) => (
+                    <div className="drum-row" key={part}>
+                      <span>{part.slice(0, 1).toUpperCase()}</span>
+                      {drumPattern[part].map((enabled, step) => (
+                        <button key={step} className={enabled ? 'on' : ''} aria-label={`${part} ${step + 1}`} onClick={() => toggleDrumStep(part, step)} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="track-editor-block">
+                <div className="track-editor-head"><strong>BASS</strong><small>octave {bassOctave}</small></div>
+                <div className="preset-tabs bass-tabs">
+                  {Object.entries(BASS_PRESETS).map(([name, preset]) => (
+                    <button key={name} className={bassPreset === name ? 'active' : ''} onClick={() => setBassPreset(name)}>{preset.label}</button>
+                  ))}
+                </div>
+                <div className="octave-switch">
+                  <span>音域</span>
+                  {[1, 2, 3].map((octave) => <button key={octave} className={bassOctave === octave ? 'active' : ''} onClick={() => setBassOctave(octave)}>{octave}</button>)}
+                </div>
+              </div>
+            </section>
+          )}
 
           <section className="panel transport-panel">
             <div className="section-head"><span>PLAY</span><span>{melodies[selectedMelody]?.length ? `Melody ${MELODY_LABELS[selectedMelody]}` : '伴奏のみでもOK'}</span></div>
@@ -823,12 +1064,37 @@ function App() {
                 )
               })}
             </div>
+            {melodies[selectedMelody]?.length > 0 && (
+              <div className="melody-editor">
+                <div className="melody-editor-nav">
+                  <button onClick={() => setMelodyEditBar((value) => Math.max(0, value - 1))} disabled={melodyEditBar === 0}>‹</button>
+                  <strong>Bar {melodyEditBar + 1} / {progression.length}</strong>
+                  <button onClick={() => setMelodyEditBar((value) => Math.min(progression.length - 1, value + 1))} disabled={melodyEditBar >= progression.length - 1}>›</button>
+                </div>
+                <div className="melody-note-grid">
+                  {Array.from({ length: 8 }, (_, step) => {
+                    const note = melodies[selectedMelody][melodyEditBar * 8 + step]
+                    return (
+                      <div key={step} className={note ? 'has-note' : ''}>
+                        <small>{step + 1}</small>
+                        <strong>{note ? note.replace(/-?\d+$/, '') : '—'}</strong>
+                        <span>
+                          <button aria-label={`${step + 1}音目を下げる`} onClick={() => editMelodyNote(step, 'down')}>−</button>
+                          <button aria-label={`${step + 1}音目を休符にする`} onClick={() => editMelodyNote(step, 'rest')}>×</button>
+                          <button aria-label={`${step + 1}音目を上げる`} onClick={() => editMelodyNote(step, 'up')}>＋</button>
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
             <p className="microcopy">{activeDna ? '参考曲の音域・順次進行率・モチーフ反復・音数密度をメロディ生成へ反映。' : '強拍はコード構成音を優先し、近い音域で短いモチーフを繰り返す。'}</p>
           </section>
         </>
       )}
 
-      <footer>v0.2.1 · static only · Vercel Functions 0 · Tone.js + Tonal.js + Songle</footer>
+      <footer>v0.3.0 · Vercel Function 1 · Essentia.js + ZeroGPU + Gemini fallback</footer>
     </main>
   )
 }

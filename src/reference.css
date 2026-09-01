@@ -372,6 +372,159 @@
   font-weight: 800;
 }
 
+.artist-results {
+  display: grid;
+  gap: 7px;
+}
+
+.artist-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 61px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 15px;
+  color: #eeeef5;
+  background: #22222b;
+  text-align: left;
+}
+
+.artist-card.selected {
+  border-color: rgba(75,227,160,0.52);
+  background: rgba(39,79,61,0.45);
+}
+
+.artist-card strong { font-size: 12px; }
+.artist-card small { color: #92919c; font-size: 9px; }
+.artist-card span { color: #6fdaa5; font-size: 8px; }
+
+.file-picker {
+  display: grid;
+  min-height: 82px;
+  padding: 16px;
+  place-items: center;
+  border: 1px dashed rgba(142,124,255,0.38);
+  border-radius: 16px;
+  background: rgba(69,59,104,0.18);
+  text-align: center;
+  cursor: pointer;
+}
+
+.file-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.file-picker b { color: #eae8ff; font-size: 13px; }
+.file-picker small { margin-top: 5px; color: #85848f; font-size: 8px; }
+.selected-reference.uploaded { background: rgba(60,52,91,0.5); }
+
+.worker-settings {
+  margin-top: 8px;
+  border-radius: 13px;
+  background: #111118;
+}
+
+.worker-settings summary {
+  padding: 11px 12px;
+  color: #9998a4;
+  font-size: 9px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.worker-settings label {
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 9px;
+}
+
+.worker-settings label span { color: #83828d; font-size: 8px; }
+.worker-settings input {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  outline: none;
+  color: #fff;
+  background: #22222b;
+  font-size: 12px;
+}
+.worker-settings p { margin: 0; padding: 0 10px 10px; color: #666570; font-size: 8px; line-height: 1.5; }
+
+.provider-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.provider-badges span {
+  padding: 6px 8px;
+  border-radius: 999px;
+  color: #686772;
+  background: #1d1d24;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.provider-badges span.ready { color: #79dfad; background: rgba(46,117,82,0.3); }
+
+.intent-input {
+  display: block;
+  width: 100%;
+  min-height: 84px;
+  padding: 12px;
+  resize: vertical;
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 14px;
+  outline: none;
+  color: #f4f3f9;
+  background: #101016;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.intent-input:focus { border-color: rgba(142,124,255,0.72); }
+
+.planner-button {
+  width: 100%;
+  min-height: 48px;
+  margin: 8px 0 2px;
+  border: 0;
+  border-radius: 15px;
+  color: #fff;
+  background: #6257c8;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.warning-text {
+  margin: 8px 2px;
+  color: #e3bd73;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.blueprint-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.blueprint-summary span {
+  padding: 6px 8px;
+  border-radius: 9px;
+  color: #d9d6ec;
+  background: #2b2939;
+  font-size: 8px;
+  font-weight: 800;
+}
+
 @media (max-width: 390px) {
   .reference-search { grid-template-columns: 1fr 58px; }
   .pipeline-steps { gap: 3px; }

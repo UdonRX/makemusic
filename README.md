@@ -1,49 +1,86 @@
 # Make Music
 
-コード進行を選びながら、伴奏と自動生成メロディをすぐ試聴できるiPhone向け作曲プロトタイプです。
+iPhone Safari向けの、参考曲解析 → 曲設計 → 編集・再生までをつなぐ作曲プロトタイプです。
 
-## v0.2 Reference Analysis
+## v0.3 — 3-layer reference pipeline
 
-- 「つくる / 参考曲解析」の2モード
-- Songle公開APIから参考曲を検索（アーティスト名・曲名）
-- YouTube / ニコニコ等のURLを直接指定可能
-- 最大3曲の解析結果をMusic DNAとして統合
-- 取得する特徴: BPM、推定Key/Mode、コード度数パターン、コード密度、メロディ音域、順次進行率、モチーフ反復、サビ位置
-- 作りたい長さ（1:00〜4:00）から曲構成Blueprintを作成
-- 「この特徴で曲を作る」で既存のコード・メロディ生成へ反映
-- 解析済みデータはSafari localStorageへ7日キャッシュ
+### 1. アーティスト情報を探す層
 
-## Existing Composer
+- MusicBrainz: アーティスト候補、国、種別、タグ
+- Songle: Beat、コード、メロディ、サビ・繰り返し構造
+- ユーザー所有音源: 12MB・10分以内のMP3 / M4A / WAV等から中央30秒だけを端末内で整形
+- Spotify / YouTube等から音源を抽出する処理はありません
 
-- C〜B / major・minor のキー選択
-- BPM 80〜180
-- Tonal.jsによるダイアトニックコード候補
-- 最大8コードの進行作成
-- Tone.jsによる Piano / Bass / Drum 伴奏ループ
-- メロディ A / B / C 自動生成
-- 参考曲Music DNA適用時は音域・順次進行率・反復率・音数密度をメロディ生成へ反映
-- iPhone Safari優先UI
+### 2. 曲の設計図を作る層
 
-## Free / Vercel Hobby policy
+- Music DNA v2: BPM、Key/Mode、コード度数、メロディ傾向、構成、音響特徴、stem統計
+- Gemini API無料枠: Music DNA JSONとユーザー指示だけからSong Blueprint v1を生成
+- APIキー未設定、無料枠終了、通信失敗時は同じschemaのローカル設計図へ自動フォールバック
+- 端末ごとのGemini呼び出しは1日8回に制限
 
-このバージョンはViteの静的フロントエンドのみです。
+### 3. 編集可能トラックへ変換する層
 
-- Vercel Functions: **0**
-- Vercel API Routes: **0**
-- バックエンド: **なし**
-- APIキー: **なし**
-- Songleへの通信: **ユーザーのブラウザから直接**
-- 音源アップロード: **Vercelへ送信しない**
+- Chord: 8小節を個別に変更
+- Drum: Kick / Snare / Hatを16ステップ編集
+- Bass: 4パターンとオクターブを編集
+- Melody: A / B / C生成後、各小節8ステップを上下・休符編集
+- Tone.js / Tonal.jsで変更を即時再生へ反映
+- iPhone消音モード用HTMLMediaElement + Web Audio解除と端末内診断ログを維持
 
-そのため重い音声解析や外部API呼び出しでVercel Function枠を消費しません。通常の静的配信帯域・ビルド枠以外のHobbyリソースは使わない設計です。
+## Architecture
 
-## Planned 3-layer architecture
+```text
+iPhone Safari
+  ├─ Vercel static: React / Tone.js / Tonal.js
+  ├─ browser WASM: Essentia.js（解析操作時だけlazy load）
+  ├─ Songle: browser direct
+  ├─ Vercel Function 1本: MusicBrainz proxy + Gemini planner
+  └─ Hugging Face public ZeroGPU Space
+       ├─ Demucs htdemucs
+       └─ Spotify Basic Pitch
+```
 
-1. **アーティスト情報を探す層** — 現在: Songle。将来は無料で使えるメタデータ源を追加。
-2. **曲の設計図を作る層** — 現在: Music DNA + ローカルルール。将来: 無料AI枠が持続可能な場合のみAI Plannerを追加。
-3. **編集可能なトラックへ変換する層** — 現在: Tone.js + Tonal.js。将来: Demucs + Basic Pitch + Essentiaを無料実行可能な構成で接続。
+Vercelへ音源をアップロードしません。音源はブラウザからHugging Face Spaceへ直接送られ、Space内の一時ディレクトリで処理後に削除されます。Make Musicへ戻るのは集約済みMusic DNA JSONだけです。
 
-Demucs / Basic Pitch / Essentiaは、Vercel上の重い処理としては実行しません。ブラウザ実行または完全無料の外部計算環境を検証してから追加します。
+## Vercel Hobby protection
+
+- Vercel Functions: **1** (`api/music.mjs`)
+- Function最大実行時間: **10秒**
+- 音源処理、Demucs、Basic Pitch、Essentia.js: **Vercel Functionで実行しない**
+- MusicBrainz結果: CDN 1日キャッシュ + Safari 7日キャッシュ
+- Gemini: ユーザー操作時のみ、端末ごとに1日8回まで
+- Geminiへ音源・stem・大量note eventは送らず、圧縮したMusic DNAだけを送信
+- ZeroGPU失敗はVercelへ再試行せず、ブラウザ内解析へフォールバック
+
+Hobbyには静的転送量やFunction利用量の上限があるため、無制限の第三者アクセスまで含む「絶対に上限へ到達しない」保証はできません。ただし通常の個人試作で重い処理がVercel消費へ加算されない設計です。Hobbyではオンデマンド超過課金を使わず、上限時は機能制限になります。
+
+## Environment variables
+
+VercelのServer側だけに設定します。`VITE_`へ秘密情報を入れないでください。
+
+```bash
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+公開ZeroGPU Space IDは秘密ではないため、Vercel build variableまたはアプリの接続欄へ設定できます。
+
+```bash
+VITE_HF_SPACE_ID=owner/makemusic-audio-dna
+```
+
+## Hugging Face Space
+
+`hf-space/`を新しいPublic Gradio Spaceへそのまま配置し、HardwareでZeroGPUを選択します。
+
+- Python 3.10
+- Demucs 4.1.0 / htdemucs
+- Basic Pitch 0.4.0
+- 30秒以下、6MB以下のmono WAVのみ
+- 同時実行1、GPU処理最大120秒
+- 一時ファイルは関数終了時に削除
+
+ZeroGPUは共有無料枠のため、account eligibility、日次GPU時間、混雑、cold startに左右されます。接続できない場合もSongle + Essentia.js + ローカル設計図で作曲を続けられます。
 
 ## Development
 
@@ -53,6 +90,11 @@ npm run dev
 npm run build
 ```
 
-## External service note
+## Licensing notes
 
-Songle Widget / APIは産総研の研究実証サービスです。個人試作では無料で利用できますが、将来営利サービスとして公開する場合はSongleの最新利用規約を確認し、必要に応じて運営元へ相談してください。
+- Essentia.js: AGPL-3.0
+- Demucs code: MIT（モデル・学習データの条件は用途ごとに要確認）
+- Basic Pitch: Apache-2.0
+- Songle: 研究実証サービス。営利利用へ進む前に最新規約を確認し、必要に応じて運営元へ相談
+
+このリポジトリは公開プロトタイプを前提にしています。ユーザーは権利を持つ音源、または解析許可を得た音源だけをアップロードしてください。
